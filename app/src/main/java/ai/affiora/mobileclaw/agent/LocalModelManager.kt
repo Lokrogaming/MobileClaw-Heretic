@@ -126,4 +126,535 @@ class LocalModelManager @Inject constructor(
     /** Observable state for a specific model. */
     fun getModelState(modelId: String): StateFlow<ModelState> =
         _modelStates.getOrPut(modelId) {
-            val info = getModelInfo
+            val info = getModelInfo(modelId)
+
+            MutableStateFlow(
+                when {
+                    modelId == CUSTOM_MODEL_ID -> computeCustomModelState()
+                    info != null -> computeInitialState(info)
+                    else -> ModelState.NotAvailable("Unknown model")
+                }
+            )
+        }.asStateFlow()
+
+    /** All model states as a map. */
+    fun getAllModelStates(): Map<String, StateFlow<ModelState>> =
+        _modelStates.mapValues { it.value.asStateFlow() }
+
+    /** Check device hardware capabilities. */
+    fun getDeviceCapability(): DeviceCapability {
+        val activityManager =
+            context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+
+        val memInfo = ActivityManager.MemoryInfo()
+        activityManager.getMemoryInfo(memInfo)
+
+        val totalRamMb = memInfo.totalMem / (1024 * 1024)
+
+        val stat = StatFs(context.filesDir.absolutePath)
+        val availableStorageMb = stat.availableBytes / (1024 * 1024)
+
+        return DeviceCapability(
+            apiLevel = Build.VERSION.SDK_INT,
+            apiLevelOk = Build.VERSION.SDK_INT >= MIN_API_LEVEL,
+            totalRamMb = totalRamMb,
+            availableStorageMb = availableStorageMb,
+        )
+    }
+
+    /** Whether the device can run a specific official model. */
+    fun canRunModel(modelId: String): Boolean {
+        val info = getModelInfo(modelId) ?: return false
+
+        val capability = getDeviceCapability()
+
+        return capability.apiLevelOk &&
+            capability.totalRamMb >= info.requiredRamMb &&
+            capability.availableStorageMb >= info.requiredStorageMb
+    }
+
+    /** Why the device can't run an official model. */
+    fun getIncompatibilityReason(modelId: String): String? {
+        val info = getModelInfo(modelId)
+            ?: return if (modelId == CUSTOM_MODEL_ID) null else "Unknown model"
+
+        val cap = getDeviceCapability()
+
+        return when {
+            !cap.apiLevelOk ->
+                "Requires Android 12+ (API 31)"
+
+            cap.totalRamMb < info.requiredRamMb ->
+                "Requires ${info.requiredRamMb / 1000} GB RAM " +
+                    "(device has ${cap.totalRamMb / 1000} GB)"
+
+            cap.availableStorageMb < info.requiredStorageMb ->
+                "Requires ${info.requiredStorageMb / 1000} GB storage " +
+                    "(${cap.availableStorageMb / 1000} GB available)"
+
+            else -> null
+        }
+    }
+
+    /**
+     * Get the filesystem path for an official or custom model.
+     */
+    fun getModelPath(modelId: String): String? {
+        if (modelId == CUSTOM_MODEL_ID) {
+            return getCustomModelPath()
+        }
+
+        val info = getModelInfo(modelId) ?: return null
+
+        val file = File(modelsDir, info.fileName)
+
+        return if (file.exists() && file.length() > 0) {
+            file.absolutePath
+        } else {
+            null
+        }
+    }
+
+    /** Whether any official or custom local model is available. */
+    fun hasAnyDownloadedModel(): Boolean {
+        return MODELS.any { getModelPath(it.id) != null } ||
+            getCustomModelPath() != null
+    }
+
+    /**
+     * Information about the currently imported custom model.
+     */
+    fun getCustomModelInfo(): LocalModelInfo? {
+        val file = getCustomModelFile() ?: return null
+
+        return LocalModelInfo(
+            id = CUSTOM_MODEL_ID,
+            displayName = file.nameWithoutExtension,
+            huggingFaceRepo = "",
+            fileName = file.name,
+            fileSizeBytes = file.length(),
+            requiredRamMb = 0,
+            requiredStorageMb = 0,
+        )
+    }
+
+    /**
+     * Import a user-selected .litertlm file.
+     *
+     * The source can be a Downloads file, Google Drive file, SD card file,
+     * or any other Android document provider.
+     *
+     * The file is copied into the application's private model directory so
+     * LiteRT-LM receives a normal filesystem path.
+     */
+    fun importCustomModel(uri: Uri): Flow<Float> = flow {
+        val stateFlow = _modelStates.getOrPut(CUSTOM_MODEL_ID) {
+            MutableStateFlow(ModelState.NotDownloaded)
+        }
+
+        stateFlow.value = ModelState.Downloading(0f)
+        emit(0f)
+
+        var tempFile: File? = null
+
+        try {
+            val fileName = getDisplayName(uri)
+                ?: throw IllegalArgumentException(
+                    "Could not determine the selected file name."
+                )
+
+            if (!fileName.endsWith(".litertlm", ignoreCase = true)) {
+                throw IllegalArgumentException(
+                    "Please select a .litertlm model file."
+                )
+            }
+
+            val contentResolver = context.contentResolver
+
+            val input = contentResolver.openInputStream(uri)
+                ?: throw IllegalStateException(
+                    "Could not open the selected file."
+                )
+
+            val fileSize = getFileSize(uri)
+
+            val availableBytes = StatFs(modelsDir.absolutePath).availableBytes
+
+            if (fileSize > 0 && availableBytes < fileSize + 100L * 1024L * 1024L) {
+                input.close()
+
+                throw IllegalStateException(
+                    "Not enough storage space. " +
+                        "The model needs approximately " +
+                        "${fileSize / (1024L * 1024L * 1024L)} GB."
+                )
+            }
+
+            // Remove any previously imported custom model.
+            customModelsDir.listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".litertlm", ignoreCase = true) }
+                ?.forEach { it.delete() }
+
+            val safeFileName = fileName
+                .replace("/", "_")
+                .replace("\\", "_")
+
+            val targetFile = File(customModelsDir, safeFileName)
+            tempFile = File(customModelsDir, "$safeFileName.tmp")
+
+            input.use { source ->
+                tempFile!!.outputStream().buffered().use { output ->
+                    val buffer = ByteArray(1024 * 1024)
+                    var totalBytes = 0L
+
+                    while (true) {
+                        val bytesRead = source.read(buffer)
+
+                        if (bytesRead == -1) break
+
+                        output.write(buffer, 0, bytesRead)
+                        totalBytes += bytesRead
+
+                        val progress = if (fileSize > 0) {
+                            (totalBytes.toFloat() / fileSize)
+                                .coerceIn(0f, 1f)
+                        } else {
+                            0f
+                        }
+
+                        stateFlow.value = ModelState.Downloading(progress)
+                        emit(progress)
+                    }
+                }
+            }
+
+            if (!tempFile!!.renameTo(targetFile)) {
+                throw IllegalStateException(
+                    "Could not finalize imported model."
+                )
+            }
+
+            tempFile = null
+
+            stateFlow.value = ModelState.Downloaded(
+                targetFile.absolutePath,
+                targetFile.length(),
+            )
+
+            persistDownloadState(
+                CUSTOM_MODEL_ID,
+                targetFile.absolutePath,
+            )
+
+            emit(1f)
+        } catch (e: CancellationException) {
+            tempFile?.delete()
+
+            stateFlow.value = computeCustomModelState()
+
+            throw e
+        } catch (e: Exception) {
+            tempFile?.delete()
+
+            val msg = e.message ?: "Import failed"
+
+            stateFlow.value = ModelState.Error(msg)
+
+            throw e
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /** Download an official model from HuggingFace. */
+    fun downloadModel(modelId: String): Flow<Float> = flow {
+        val info = getModelInfo(modelId)
+            ?: throw IllegalArgumentException("Unknown model: $modelId")
+
+        val reason = getIncompatibilityReason(modelId)
+
+        if (reason != null) {
+            throw IllegalStateException(reason)
+        }
+
+        val stateFlow = _modelStates[modelId]
+            ?: return@flow
+
+        stateFlow.value = ModelState.Downloading(0f)
+        emit(0f)
+
+        val url =
+            "https://huggingface.co/${info.huggingFaceRepo}/resolve/main/${info.fileName}"
+
+        val targetFile = File(modelsDir, info.fileName)
+        val tempFile = File(modelsDir, "${info.fileName}.tmp")
+
+        try {
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", "MobileClaw/1.0")
+                .build()
+
+            val response = httpClient.newCall(request).execute()
+
+            if (!response.isSuccessful) {
+                throw Exception(
+                    "Download failed: HTTP ${response.code}"
+                )
+            }
+
+            val body = response.body
+                ?: throw Exception("Empty response body")
+
+            val contentLength =
+                body.contentLength()
+                    .let { if (it > 0) it else info.fileSizeBytes }
+
+            body.byteStream().use { input ->
+                tempFile.outputStream().use { output ->
+                    val buffer = ByteArray(8192)
+                    var totalBytesRead = 0L
+
+                    while (true) {
+                        val bytesRead = input.read(buffer)
+
+                        if (bytesRead == -1) break
+
+                        output.write(buffer, 0, bytesRead)
+                        totalBytesRead += bytesRead
+
+                        val progress =
+                            (totalBytesRead.toFloat() / contentLength)
+                                .coerceIn(0f, 1f)
+
+                        stateFlow.value =
+                            ModelState.Downloading(progress)
+
+                        emit(progress)
+                    }
+                }
+            }
+
+            if (tempFile.exists()) {
+                targetFile.delete()
+                tempFile.renameTo(targetFile)
+            }
+
+            stateFlow.value =
+                ModelState.Downloaded(
+                    targetFile.absolutePath,
+                    targetFile.length(),
+                )
+
+            persistDownloadState(
+                modelId,
+                targetFile.absolutePath,
+            )
+
+            emit(1f)
+        } catch (e: CancellationException) {
+            tempFile.delete()
+            stateFlow.value = ModelState.NotDownloaded
+            throw e
+        } catch (e: Exception) {
+            tempFile.delete()
+
+            val msg = e.message ?: "Download failed"
+
+            stateFlow.value = ModelState.Error(msg)
+
+            throw e
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /** Cancel an in-progress download/import. */
+    fun cancelDownload(modelId: String) {
+        downloadJobs[modelId]?.cancel()
+        downloadJobs.remove(modelId)
+
+        if (modelId == CUSTOM_MODEL_ID) {
+            customModelsDir.listFiles()
+                ?.filter { it.name.endsWith(".tmp", ignoreCase = true) }
+                ?.forEach { it.delete() }
+
+            _modelStates[modelId]?.value =
+                computeCustomModelState()
+
+            return
+        }
+
+        val info = getModelInfo(modelId) ?: return
+
+        File(modelsDir, "${info.fileName}.tmp").delete()
+
+        _modelStates[modelId]?.value =
+            ModelState.NotDownloaded
+    }
+
+    /** Delete an official or custom model. */
+    suspend fun deleteModel(modelId: String) {
+        withContext(Dispatchers.IO) {
+            if (modelId == CUSTOM_MODEL_ID) {
+                customModelsDir.listFiles()
+                    ?.filter {
+                        it.isFile &&
+                            (
+                                it.name.endsWith(
+                                    ".litertlm",
+                                    ignoreCase = true,
+                                ) ||
+                                    it.name.endsWith(
+                                        ".tmp",
+                                        ignoreCase = true,
+                                    )
+                            )
+                    }
+                    ?.forEach { it.delete() }
+
+                _modelStates[modelId]?.value =
+                    ModelState.NotDownloaded
+
+                clearDownloadState(modelId)
+
+                return@withContext
+            }
+
+            val info = getModelInfo(modelId)
+                ?: return@withContext
+
+            File(modelsDir, info.fileName).delete()
+            File(modelsDir, "${info.fileName}.tmp").delete()
+
+            _modelStates[modelId]?.value =
+                ModelState.NotDownloaded
+
+            clearDownloadState(modelId)
+        }
+    }
+
+    /** Track a download/import job for cancellation. */
+    fun trackDownloadJob(modelId: String, job: Job) {
+        downloadJobs[modelId] = job
+    }
+
+    // ── Internal ───────────────────────────────────────────────────────────
+
+    private fun computeInitialState(
+        info: LocalModelInfo,
+    ): ModelState {
+        val reason = getIncompatibilityReason(info.id)
+
+        if (reason != null) {
+            return ModelState.NotAvailable(reason)
+        }
+
+        val file = File(modelsDir, info.fileName)
+
+        return if (file.exists() && file.length() > 0) {
+            ModelState.Downloaded(
+                file.absolutePath,
+                file.length(),
+            )
+        } else {
+            ModelState.NotDownloaded
+        }
+    }
+
+    private fun computeCustomModelState(): ModelState {
+        if (Build.VERSION.SDK_INT < MIN_API_LEVEL) {
+            return ModelState.NotAvailable(
+                "Requires Android 12+ (API 31)"
+            )
+        }
+
+        val file = getCustomModelFile()
+
+        return if (file != null) {
+            ModelState.Downloaded(
+                file.absolutePath,
+                file.length(),
+            )
+        } else {
+            ModelState.NotDownloaded
+        }
+    }
+
+    private fun getCustomModelFile(): File? {
+        return customModelsDir
+            .listFiles()
+            ?.firstOrNull {
+                it.isFile &&
+                    it.length() > 0 &&
+                    it.name.endsWith(
+                        ".litertlm",
+                        ignoreCase = true,
+                    )
+            }
+    }
+
+    private fun getCustomModelPath(): String? =
+        getCustomModelFile()?.absolutePath
+
+    private fun getDisplayName(uri: Uri): String? {
+        return context.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                cursor.getString(
+                    cursor.getColumnIndexOrThrow(
+                        OpenableColumns.DISPLAY_NAME
+                    )
+                )
+            } else {
+                null
+            }
+        }
+    }
+
+    private fun getFileSize(uri: Uri): Long {
+        return context.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.SIZE),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                cursor.getLong(
+                    cursor.getColumnIndexOrThrow(
+                        OpenableColumns.SIZE
+                    )
+                )
+            } else {
+                -1L
+            }
+        } ?: -1L
+    }
+
+    private suspend fun persistDownloadState(
+        modelId: String,
+        path: String,
+    ) {
+        context.localModelDataStore.edit { prefs ->
+            prefs[
+                stringPreferencesKey(
+                    "model_path_$modelId"
+                )
+            ] = path
+        }
+    }
+
+    private suspend fun clearDownloadState(
+        modelId: String,
+    ) {
+        context.localModelDataStore.edit { prefs ->
+            prefs.remove(
+                stringPreferencesKey(
+                    "model_path_$modelId"
+                )
+            )
+        }
+    }
+}
