@@ -421,3 +421,4 @@ class SettingsViewModel @Inject constructor(
         officialLocalModels +
         listOfNotNull(customModel)
 }
+}
