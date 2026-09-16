@@ -394,11 +394,24 @@ private fun ProviderPage(
     // provider supports without waiting for us to hardcode it in AiProvider.kt
     var customModelProvider by remember { mutableStateOf<AiProvider?>(null) }
     var customModelInput by remember { mutableStateOf("") }
+    val customModelPicker = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.OpenDocument(),
+) { uri ->
+    uri?.let {
+        viewModel.importCustomModel(it)
+    }
+}
 
     val configuredKeys = providerTokens.filter { it.hasToken }
     val availableModels = viewModel.getAvailableModelsIncludingLocal()
-    val modelDisplay = selectedProvider.models
-        .firstOrNull { it.id == selectedModel }?.displayName ?: selectedModel
+    val modelDisplay = availableModels
+    .firstOrNull {
+        it.first == selectedProvider &&
+            it.second.id == selectedModel
+    }
+    ?.second
+    ?.displayName
+    ?: selectedModel
 
     // Add Key dialog
     if (showAddKeyDialog) {
@@ -647,6 +660,24 @@ private fun ProviderPage(
                 )
             }
         }
+        // ↓ AB HIER NEU EINFÜGEN
+Spacer(Modifier.height(8.dp))
+
+OutlinedButton(
+    onClick = {
+        customModelPicker.launch(arrayOf("*/*"))
+    },
+    modifier = Modifier.fillMaxWidth(),
+) {
+    Icon(
+        Icons.Filled.FolderOpen,
+        contentDescription = null,
+    )
+
+    Spacer(Modifier.width(8.dp))
+
+    Text("Eigenes .litertlm Modell auswählen")
+}
 
         Spacer(Modifier.height(24.dp))
 

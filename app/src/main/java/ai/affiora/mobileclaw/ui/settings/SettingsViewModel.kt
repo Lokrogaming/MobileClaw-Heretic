@@ -3,6 +3,7 @@ package ai.affiora.mobileclaw.ui.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import android.content.Intent
+import android.net.Uri
 import ai.affiora.mobileclaw.agent.AiModel
 import ai.affiora.mobileclaw.agent.AiProvider
 import ai.affiora.mobileclaw.agent.DeviceCapability
@@ -362,6 +363,22 @@ class SettingsViewModel @Inject constructor(
         }
         localModelManager.trackDownloadJob(modelId, job)
     }
+    fun importCustomModel(uri: Uri) {
+    val job = viewModelScope.launch {
+        try {
+            localModelManager.importCustomModel(uri).collect {
+                refreshLocalModelStates()
+            }
+        } catch (e: Exception) {
+            refreshLocalModelStates()
+        }
+    }
+
+    localModelManager.trackDownloadJob(
+        LocalModelManager.CUSTOM_MODEL_ID,
+        job,
+    )
+}
 
     fun cancelDownload(modelId: String) {
         localModelManager.cancelDownload(modelId)
@@ -381,14 +398,26 @@ class SettingsViewModel @Inject constructor(
 
     /** Include LOCAL_GEMMA in available models when a model is downloaded. */
     fun getAvailableModelsIncludingLocal(): List<Pair<AiProvider, AiModel>> {
-        val cloudModels = getAvailableModels()
-        val localModels = if (localModelManager.hasAnyDownloadedModel()) {
-            AiProvider.LOCAL_GEMMA.models
-                .filter { localModelManager.getModelPath(it.id) != null }
-                .map { AiProvider.LOCAL_GEMMA to it }
-        } else {
-            emptyList()
+    val cloudModels = getAvailableModels()
+
+    val officialLocalModels = AiProvider.LOCAL_GEMMA.models
+        .filter {
+            localModelManager.getModelPath(it.id) != null
         }
-        return cloudModels + localModels
-    }
+        .map {
+            AiProvider.LOCAL_GEMMA to it
+        }
+
+    val customModel = localModelManager
+        .getCustomModelInfo()
+        ?.let { info ->
+            AiProvider.LOCAL_GEMMA to AiModel(
+                LocalModelManager.CUSTOM_MODEL_ID,
+                info.displayName,
+            )
+        }
+
+    return cloudModels +
+        officialLocalModels +
+        listOfNotNull(customModel)
 }
