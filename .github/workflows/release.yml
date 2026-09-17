@@ -17,13 +17,14 @@ jobs:
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
       - name: Restore release keystore
-        if: secrets.ANDROID_KEYSTORE_BASE64 != ''
         shell: bash
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          mkdir -p ~/.android
-          printenv KEYSTORE_B64 | base64 -d > ~/.android/mobileclaw-release.keystore
+          if [ -n "$KEYSTORE_B64" ]; then
+            mkdir -p ~/.android
+            printenv KEYSTORE_B64 | base64 -d > ~/.android/mobileclaw-release.keystore
+          fi
       - run: ./gradlew assembleRelease
         env:
           MOBILECLAW_KEYSTORE_PASSWORD: ${{ secrets.MOBILECLAW_KEYSTORE_PASSWORD }}
