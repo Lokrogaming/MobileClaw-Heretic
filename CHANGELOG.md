@@ -3,6 +3,12 @@
 All notable changes to MobileClaw will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.14] - 2026-09-17
+
+### Fixed
+- Kleiner Fix: Release-Builds werden in CI jetzt automatisch signiert
+  (`release.yml` stellt den Keystore aus den Secrets wieder her).
+
 ## [1.2.13] - 2026-09-17
 
 ### Fixed
