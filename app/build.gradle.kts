@@ -26,6 +26,9 @@ android {
             // Local-only keystore at ~/.android/mobileclaw-release.keystore.
             // Password read from env (MOBILECLAW_KEYSTORE_PASSWORD) or ~/.gradle/gradle.properties
             // (mobileclaw.keystore.password). Neither the keystore nor the password is in git.
+            // In CI (no keystore file) this config stays empty and is NOT applied below,
+            // so assembleRelease produces an unsigned APK instead of failing with
+            // "SigningConfig release is missing required property storeFile".
             val keystoreFile = file("${System.getProperty("user.home")}/.android/mobileclaw-release.keystore")
             if (keystoreFile.exists()) {
                 storeFile = keystoreFile
@@ -47,7 +50,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            // Only sign when a keystore actually exists (local release builds).
+            // CI has no keystore -> leave unsigned so the build succeeds.
+            val keystoreFile = file("${System.getProperty("user.home")}/.android/mobileclaw-release.keystore")
+            if (keystoreFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
         debug {
             isMinifyEnabled = false
@@ -109,6 +117,7 @@ dependencies {
     implementation(libs.compose.ui.graphics)
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
+    implementation(libs.compose.material.icons.core)
     implementation(libs.compose.material.icons.extended)
     debugImplementation(libs.compose.ui.tooling)
 

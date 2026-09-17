@@ -16,7 +16,9 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: 17
+          # Java 21: litertlm + mockk/ByteBuddy need class file version > 17.
+          # App still compiles to bytecode 17 (see app/build.gradle.kts) for device compat.
+          java-version: 21
       - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew assembleDebug testDebugUnitTest
       - uses: actions/upload-artifact@v7

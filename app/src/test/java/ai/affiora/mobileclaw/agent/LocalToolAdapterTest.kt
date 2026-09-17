@@ -3,8 +3,6 @@ package ai.affiora.mobileclaw.agent
 import ai.affiora.mobileclaw.tools.AndroidTool
 import ai.affiora.mobileclaw.tools.ToolResult
 import com.google.common.truth.Truth.assertThat
-import io.mockk.coEvery
-import io.mockk.mockk
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -12,15 +10,12 @@ import org.junit.jupiter.api.Test
 
 class LocalToolAdapterTest {
 
-    private fun createMockTool(
-        name: String = "test_tool",
-        description: String = "A test tool",
-        result: ToolResult = ToolResult.Success("ok"),
-    ): AndroidTool {
-        val tool = mockk<AndroidTool>()
-        io.mockk.every { tool.name } returns name
-        io.mockk.every { tool.description } returns description
-        io.mockk.every { tool.parameters } returns JsonObject(
+    private class FakeAndroidTool(
+        override val name: String = "test_tool",
+        override val description: String = "A test tool",
+        private val result: ToolResult = ToolResult.Success("ok"),
+    ) : AndroidTool {
+        override val parameters: JsonObject = JsonObject(
             mapOf(
                 "type" to JsonPrimitive("object"),
                 "properties" to JsonObject(
@@ -36,9 +31,15 @@ class LocalToolAdapterTest {
                 "required" to kotlinx.serialization.json.JsonArray(listOf(JsonPrimitive("query"))),
             ),
         )
-        coEvery { tool.execute(any()) } returns result
-        return tool
+
+        override suspend fun execute(params: Map<String, JsonElement>): ToolResult = result
     }
+
+    private fun createMockTool(
+        name: String = "test_tool",
+        description: String = "A test tool",
+        result: ToolResult = ToolResult.Success("ok"),
+    ): AndroidTool = FakeAndroidTool(name, description, result)
 
     @Test
     fun `getToolDescriptionJsonString contains name and description`() {

@@ -347,9 +347,38 @@ class SettingsViewModel @Inject constructor(
     )
     val localModelStates: StateFlow<Map<String, ModelState>> = _localModelStates.asStateFlow()
 
+    /** Reactive count of downloaded local models (for settings subtitle). */
+    private val _downloadedModelCount = MutableStateFlow(
+        localModelManager.getAllModelStates().values.count { it.value is ModelState.Downloaded }
+    )
+    val downloadedModelCountFlow: StateFlow<Int> = _downloadedModelCount.asStateFlow()
+
     /** Number of downloaded local models (for settings subtitle). */
     val downloadedModelCount: Int
-        get() = _localModelStates.value.count { it.value is ModelState.Downloaded }
+        get() = _downloadedModelCount.value
+
+    /** Last custom-model import error (null = no error). Shown in Settings + LocalModel screens. */
+    private val _customImportError = MutableStateFlow<String?>(null)
+    val customImportError: StateFlow<String?> = _customImportError.asStateFlow()
+
+    fun clearCustomImportError() {
+        _customImportError.value = null
+    }
+
+    /** Display name of the imported custom model, or null when none is imported. */
+    val customModelDisplayName: StateFlow<String?> =
+        localModelStates
+            .map { states ->
+                val s = states[LocalModelManager.CUSTOM_MODEL_ID]
+                if (s is ModelState.Downloaded) {
+                    // Derive name from path (LocalModelManager.getCustomModelInfo does IO).
+                    s.path.substringAfterLast("/").removeSuffix(".litertlm")
+                        .ifBlank { "Eigenes Modell" }
+                } else {
+                    null
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     fun downloadModel(modelId: String) {
         val job = viewModelScope.launch {
@@ -363,22 +392,42 @@ class SettingsViewModel @Inject constructor(
         }
         localModelManager.trackDownloadJob(modelId, job)
     }
+
     fun importCustomModel(uri: Uri) {
-    val job = viewModelScope.launch {
-        try {
-            localModelManager.importCustomModel(uri).collect {
+        _customImportError.value = null
+        val job = viewModelScope.launch {
+            try {
+                localModelManager.importCustomModel(uri).collect {
+                    refreshLocalModelStates()
+                }
+                // Import succeeded -> clear any previous error.
+                _customImportError.value = null
+            } catch (e: Exception) {
                 refreshLocalModelStates()
+                _customImportError.value = when {
+                    e.message?.contains(".litertlm", ignoreCase = true) == true ->
+                        e.message
+                    e is IllegalArgumentException ->
+                        e.message ?: "Ungültige Datei. Bitte eine .litertlm-Datei wählen."
+                    else ->
+                        "Import fehlgeschlagen: ${e.message ?: "Unbekannter Fehler"}"
+                }
             }
-        } catch (e: Exception) {
-            refreshLocalModelStates()
         }
+
+        localModelManager.trackDownloadJob(
+            LocalModelManager.CUSTOM_MODEL_ID,
+            job,
+        )
     }
 
-    localModelManager.trackDownloadJob(
-        LocalModelManager.CUSTOM_MODEL_ID,
-        job,
-    )
-}
+    /** Activate an on-device model (official or custom) as the current provider/model. */
+    fun selectLocalModel(modelId: String) {
+        viewModelScope.launch {
+            userPreferences.setSelectedProvider(AiProvider.LOCAL_GEMMA.id)
+            userPreferences.setSelectedModel(modelId)
+        }
+    }
 
     fun cancelDownload(modelId: String) {
         localModelManager.cancelDownload(modelId)
@@ -393,7 +442,9 @@ class SettingsViewModel @Inject constructor(
     }
 
     private fun refreshLocalModelStates() {
-        _localModelStates.value = localModelManager.getAllModelStates().mapValues { it.value.value }
+        val states = localModelManager.getAllModelStates().mapValues { it.value.value }
+        _localModelStates.value = states
+        _downloadedModelCount.value = states.values.count { it is ModelState.Downloaded }
     }
 
     /** Include LOCAL_GEMMA in available models when a model is downloaded. */

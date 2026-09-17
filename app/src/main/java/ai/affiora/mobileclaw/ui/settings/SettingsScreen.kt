@@ -6,6 +6,8 @@ import android.provider.Settings
 import ai.affiora.mobileclaw.BuildConfig
 import ai.affiora.mobileclaw.R
 import ai.affiora.mobileclaw.agent.AiProvider
+import ai.affiora.mobileclaw.agent.LocalModelManager
+import ai.affiora.mobileclaw.agent.ModelState
 import ai.affiora.mobileclaw.agent.PermissionManager
 import ai.affiora.mobileclaw.connectors.ConnectorAuthType
 import ai.affiora.mobileclaw.connectors.ConnectorConfig
@@ -43,8 +45,12 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.CalendarToday
-import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EditNote
@@ -68,6 +74,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -77,6 +84,7 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
@@ -623,7 +631,7 @@ private fun ProviderPage(
         )
         Spacer(Modifier.height(8.dp))
 
-        val downloadedCount = viewModel.downloadedModelCount
+        val downloadedCount by viewModel.downloadedModelCountFlow.collectAsStateWithLifecycle()
         Card(
             onClick = { onNavigate("local-models") },
             modifier = Modifier.fillMaxWidth(),
@@ -661,24 +669,15 @@ private fun ProviderPage(
                 )
             }
         }
-        // ↓ AB HIER NEU EINFÜGEN
-Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(8.dp))
 
-OutlinedButton(
-    onClick = {
-        customModelPicker.launch(arrayOf("*/*"))
-    },
-    modifier = Modifier.fillMaxWidth(),
-) {
-    Icon(
-        Icons.Filled.FolderOpen,
-        contentDescription = null,
-    )
-
-    Spacer(Modifier.width(8.dp))
-
-    Text("Eigenes .litertlm Modell auswählen")
-}
+        // ── Eigenes .litertlm-Modell: Auswahl mit Status, Fortschritt, Fehler & Aktivierung ──
+        CustomLocalModelCard(
+            viewModel = viewModel,
+            selectedProvider = selectedProvider,
+            selectedModel = selectedModel,
+            onPickFile = { customModelPicker.launch(arrayOf("*/*")) },
+        )
 
         Spacer(Modifier.height(24.dp))
 
@@ -808,6 +807,199 @@ OutlinedButton(
 private fun maskToken(token: String): String {
     if (token.length <= 4) return token
     return "${"*".repeat(minOf(token.length - 4, 12))}${token.takeLast(4)}"
+}
+
+/**
+ * Eigenes .litertlm-Modell: Auswahl mit Live-Status, Import-Fortschritt,
+ * Fehleranzeige, Löschen und "Als aktiv setzen".
+ *
+ * Verbesserungen gegenüber dem reinen Datei-Button:
+ * - zeigt Name/Größe des importierten Modells (oder leeren Zustand)
+ * - zeigt Import-Fortschritt (%) + Abbrechen
+ * - zeigt Import-Fehler (z. B. falsches Format, zu wenig Speicher) mit Dismiss
+ * - "Aktivieren" setzt Provider=On-Device + Modell=custom-litertlm in einem Schritt
+ * - "Löschen" entfernt die Datei + resettet die Auswahl falls aktiv
+ */
+@Composable
+private fun CustomLocalModelCard(
+    viewModel: SettingsViewModel,
+    selectedProvider: AiProvider,
+    selectedModel: String,
+    onPickFile: () -> Unit,
+) {
+    val localStates by viewModel.localModelStates.collectAsStateWithLifecycle()
+    val customName by viewModel.customModelDisplayName.collectAsStateWithLifecycle()
+    val importError by viewModel.customImportError.collectAsStateWithLifecycle()
+
+    val customState = localStates[LocalModelManager.CUSTOM_MODEL_ID]
+    val isActive = selectedProvider.isLocal && selectedModel == LocalModelManager.CUSTOM_MODEL_ID
+
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.Memory,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp),
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Eigenes Modell (.litertlm)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        when {
+                            customState is ModelState.Downloaded && customName != null ->
+                                "$customName · offline nutzbar"
+                            customState is ModelState.Downloading ->
+                                "Wird importiert… ${(customState.progress * 100).toInt()} %"
+                            else -> "Aus Downloads, Drive oder SD-Karte importieren"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (isActive) {
+                    Icon(
+                        Icons.Filled.CheckCircle,
+                        contentDescription = "Aktiv",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+            }
+
+            // Import-Fortschritt
+            if (customState is ModelState.Downloading) {
+                Spacer(Modifier.height(12.dp))
+                LinearProgressIndicator(
+                    progress = { customState.progress },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "${(customState.progress * 100).toInt()} %",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    TextButton(onClick = { viewModel.cancelDownload(LocalModelManager.CUSTOM_MODEL_ID) }) {
+                        Text("Abbrechen")
+                    }
+                }
+            }
+
+            // Fehleranzeige
+            val errorText = importError ?: (customState as? ModelState.Error)?.message
+            if (errorText != null) {
+                Spacer(Modifier.height(12.dp))
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.Error,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            errorText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { viewModel.clearCustomImportError() }) {
+                            Text("OK")
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Nur .litertlm-Dateien (LiteRT-LM). Große Modelle brauchen mehrere GB freien Speicher.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+
+            // Aktionen
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onPickFile,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (customState is ModelState.Downloaded) "Ersetzen…" else "Datei wählen…",
+                    )
+                }
+                if (customState is ModelState.Downloaded) {
+                    if (!isActive) {
+                        Button(
+                            onClick = { viewModel.selectLocalModel(LocalModelManager.CUSTOM_MODEL_ID) },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text("Aktivieren")
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = { /* bereits aktiv – kein Wechsel nötig */ },
+                            enabled = false,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Aktiv")
+                        }
+                    }
+                }
+            }
+
+            if (customState is ModelState.Downloaded) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { viewModel.deleteModel(LocalModelManager.CUSTOM_MODEL_ID) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) {
+                    Icon(Icons.Filled.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Eigenes Modell löschen")
+                }
+            } else {
+                Spacer(Modifier.height(4.dp))
+                OutlinedButton(
+                    onClick = { viewModel.downloadModel("gemma-4-e2b") },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Stattdessen Gemma 4 E2B laden (2,6 GB)")
+                }
+            }
+        }
+    }
 }
 
 /**
